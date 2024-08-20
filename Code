@@ -1,0 +1,141 @@
+import serial
+import requests
+import time
+import numpy as np
+
+API_KEY = 'Add API key'
+
+BASE_URL = 'https://rest.coinapi.io/v1/exchangerate'
+
+cryptocurrencies = ['BTC', 'ETH', 'SOL', 'DOGE', 'ADA']
+
+target_currency = 'GBP'
+
+headers = {
+'X-CoinAPI-Key': API_KEY
+}
+
+bluetooth_serial = serial.Serial('COM3', 9600)
+
+original_prices = {}
+prices_history = {crypto: [] for crypto in cryptocurrencies}
+price_variance_signals = {}
+sma_signals = {}
+rsi_signals = {}
+macd_signals = {}
+bollinger_band_signals = {}
+
+def get_crypto_price(crypto):
+url = f'{BASE_URL}/{crypto}/{target_currency}'
+response = requests.get(url, headers=headers)
+if response.status_code == 200:
+data = response.json()
+return data['rate']
+else:
+return None
+
+def calculate_sma(prices, window):
+if len(prices) < window:
+return None
+else:
+return np.mean(prices[-window:])
+
+def calculate_rsi(prices, period=14):
+if len(prices) < period + 1:
+return None
+deltas = np.diff(prices)
+gains = deltas[deltas > 0]
+losses = -deltas[deltas < 0]
+avg_gain = np.mean(gains[-period:]) if len(gains) > 0 else 0
+avg_loss = np.mean(losses[-period:]) if len(losses) > 0 else 0
+rs = avg_gain / avg_loss if avg_loss != 0 else 0
+rsi = 100 - (100 / (1 + rs))
+return rsi
+
+def calculate_macd(prices, short_window=12, long_window=26, signal_window=9):
+if len(prices) < long_window:
+return None, None
+short_ema = np.mean(prices[-short_window:])
+long_ema = np.mean(prices[-long_window:])
+macd_line = short_ema - long_ema
+signal_line = np.mean(prices[-signal_window:])
+return macd_line, signal_line
+
+def calculate_bollinger_bands(prices, window=20, num_std_dev=2):
+if len(prices) < window:
+return None, None, None
+sma = calculate_sma(prices, window)
+std_dev = np.std(prices[-window:])
+upper_band = sma + num_std_dev * std_dev
+lower_band = sma - num_std_dev * std_dev
+return upper_band, sma, lower_band
+
+def check_price_variance(original_price, current_price):
+price_variance = abs(current_price - original_price) / original_price * 100
+return price_variance > 7
+
+def send_signal_to_arduino(signal):
+bluetooth_serial.write(signal.encode())
+
+for crypto in cryptocurrencies:
+original_prices[crypto] = get_crypto_price(crypto)
+
+while True:
+for crypto in cryptocurrencies:
+current_price = get_crypto_price(crypto)
+if current_price is not None:
+
+        prices_history[crypto].append(current_price)
+
+        
+        if check_price_variance(original_prices[crypto], current_price):
+            price_variance_signals[crypto] = True
+            print(f'Buy signal for {crypto} - Price variance exceeds 7%')
+            send_signal_to_arduino('1')  # Send signal to Arduino
+        else:
+            price_variance_signals[crypto] = False
+
+        
+        short_sma = calculate_sma(prices_history[crypto], 20)
+        long_sma = calculate_sma(prices_history[crypto], 50)
+        if short_sma is not None and long_sma is not None:
+            sma_signals[crypto] = short_sma > long_sma
+            if sma_signals[crypto]:
+                print(f'Buy signal for {crypto} - SMA crossover')
+                send_signal_to_arduino('1')  # Send signal to Arduino
+        else:
+            sma_signals[crypto] = False
+
+        
+        rsi = calculate_rsi(prices_history[crypto])
+        if rsi is not None and rsi < 30:
+            rsi_signals[crypto] = True
+            print(f'Buy signal for {crypto} - RSI indicates oversold conditions')
+            send_signal_to_arduino('1')  # Send signal to Arduino
+        else:
+            rsi_signals[crypto] = False
+
+        
+        macd_line, signal_line = calculate_macd(prices_history[crypto])
+        if macd_line is not None and signal_line is not None:
+            macd_signals[crypto] = macd_line > signal_line
+            if macd_signals[crypto]:
+                print(f'Buy signal for {crypto} - MACD crossover')
+                send_signal_to_arduino('1')  # Send signal to Arduino
+        else:
+            macd_signals[crypto] = False
+
+        
+        upper_band, middle_band, lower_band = calculate_bollinger_bands(prices_history[crypto])
+        if upper_band is not None and lower_band is not None and current_price < lower_band:
+            bollinger_band_signals[crypto] = True
+            print(f'Buy signal for {crypto} - Price below lower Bollinger Band')
+            send_signal_to_arduino('1')  # Send signal to Arduino
+        else:
+            bollinger_band_signals[crypto] = False
+
+        print(f'Current price for {crypto}: {current_price}')
+    else:
+        print(f'Error fetching price for {crypto}')
+
+time.sleep(15 * 60)
